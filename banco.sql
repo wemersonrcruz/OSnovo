@@ -274,6 +274,25 @@ CREATE TABLE IF NOT EXISTS `financeiro_pagamentos` (
     FOREIGN KEY (`id_usuario_registro`) REFERENCES `usuarios`(`id_usuario`) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE `financeiro` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `tipo` enum('receita','despesa') NOT NULL,
+  `cliente_id` int(11) DEFAULT NULL,
+  `valor` decimal(10,2) NOT NULL,
+  `descricao` text NOT NULL,
+  `data_vencimento` date NOT NULL,
+  `data_pagamento` date DEFAULT NULL,
+  `status` enum('pendente','pago','cancelado','atrasado') NOT NULL DEFAULT 'pendente',
+  `usuario_id` int(11) NOT NULL,
+  `data_criacao` datetime NOT NULL,
+  `data_atualizacao` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `cliente_id` (`cliente_id`),
+  KEY `usuario_id` (`usuario_id`),
+  CONSTRAINT `financeiro_ibfk_1` FOREIGN KEY (`cliente_id`) REFERENCES `clientes` (`id_cliente`) ON DELETE SET NULL,
+  CONSTRAINT `financeiro_ibfk_2` FOREIGN KEY (`usuario_id`) REFERENCES `usuarios` (`id_usuario`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Tabela de Configurações do Sistema
 CREATE TABLE IF NOT EXISTS `configuracoes` (
     `id_configuracao` INT AUTO_INCREMENT PRIMARY KEY,
