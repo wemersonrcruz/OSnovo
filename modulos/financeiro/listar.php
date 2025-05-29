@@ -1,373 +1,343 @@
 <?php
-require_once '../../includes/config.php';
-requerLogin();
+// Inclui o cabeçalho da página, que contém a conexão com o banco de dados e outras configurações iniciais.
+require_once '../../includes/header.php';
+// Inclui as funções auxiliares do sistema.
+require_once '../../includes/functions.php';
 
 if (!verificarPermissao(['Administrador', 'Atendente'])) {
     redirecionarComMensagem('../../dashboard.php', 'error', 'Você não tem permissão para acessar este módulo.');
 }
 
-$titulo_pagina = "Listar Financeiro";
-$body_id = "page-financeiro-listar";
-$breadcrumb = [
-    ['texto' => 'Financeiro', 'link' => '#'],
-    ['texto' => 'Listar', 'link' => 'listar.php']
-];
+// Define variáveis para filtros e paginação
+$page = isset($_GET['page']) && is_numeric($_GET['page']) ? (int)$_GET['page'] : 1;
+$limit = 10; // Número de itens por página
 
-$tipo_documento = filter_input(INPUT_GET, 'tipo', FILTER_SANITIZE_STRING) ?? 'faturas'; // 'faturas' ou 'recibos'
-$status_filter = filter_input(INPUT_GET, 'status', FILTER_SANITIZE_STRING);
-$cliente_filter = filter_input(INPUT_GET, 'cliente_id', FILTER_VALIDATE_INT);
-$data_inicio_filter = filter_input(INPUT_GET, 'data_inicio', FILTER_SANITIZE_STRING);
-$data_fim_filter = filter_input(INPUT_GET, 'data_fim', FILTER_SANITIZE_STRING);
-$search_query = sanitizar($_GET['q'] ?? '');
+// Parâmetros de filtro
+$status_filter = $_GET['status'] ?? '';
+$data_inicio_filter = $_GET['data_inicio'] ?? '';
+$data_fim_filter = $_GET['data_fim'] ?? '';
+$cliente_filter = $_GET['cliente'] ?? '';
+$tipo_documento_filter = $_GET['tipo_documento'] ?? ''; // Renomeado de tipo_lancamento_filter para tipo_documento_filter
 
-$query_params = [];
-$where_clauses = [];
+$all_finance_records = []; // Array para armazenar todos os registros combinados
 
-$query_base_faturas = "
+// --- Consulta para Faturas (financeiro_faturas) ---
+$params = [];
+$where_clauses = ["1=1"];
+
+if (!empty($status_filter)) {
+    // A função formatStatusForQuery não é mais necessária, pois usamos os ENUMs diretamente
+    $where_clauses[] = "ff.status_fatura = :status_fatura";
+    $params[':status_fatura'] = ucwords(str_replace('_', ' ', strtolower($status_filter))); // Garante que o status seja formatado corretamente
+}
+if (!empty($data_inicio_filter)) {
+    $where_clauses[] = "ff.data_emissao >= :data_inicio";
+    $params[':data_inicio'] = $data_inicio_filter . ' 00:00:00';
+}
+if (!empty($data_fim_filter)) {
+    $where_clauses[] = "ff.data_emissao <= :data_fim";
+    $params[':data_fim'] = $data_fim_filter . ' 23:59:59';
+}
+if (!empty($cliente_filter)) {
+    $where_clauses[] = "c.nome LIKE :cliente";
+    $params[':cliente'] = '%' . $cliente_filter . '%';
+}
+if (!empty($tipo_documento_filter)) {
+    $where_clauses[] = "ff.tipo_documento = :tipo_documento";
+    $params[':tipo_documento'] = $tipo_documento_filter;
+}
+
+$sql_base = "
     SELECT
-        ff.id_fatura, ff.id_os, ff.id_fatura_locacao, ff.id_cliente, ff.data_emissao, ff.data_vencimento, ff.valor_total, ff.status_fatura, ff.tipo_documento,
+        ff.id_fatura AS id,
+        ff.tipo_documento AS tipo_lancamento,
         c.nome AS nome_cliente,
-        os.id_os AS numero_os,
-        lf.data_referencia_fatura AS ref_locacao
+        ff.valor_total AS valor,
+        ff.observacoes AS descricao,
+        ff.data_emissao AS data_origem,
+        ff.data_vencimento AS data_vencimento,
+        ff.status_fatura AS status_origem,
+        GROUP_CONCAT(fp.valor_pago ORDER BY fp.data_pagamento SEPARATOR '; ') AS valores_pagos,
+        GROUP_CONCAT(fp.data_pagamento ORDER BY fp.data_pagamento SEPARATOR '; ') AS datas_pagamentos,
+        GROUP_CONCAT(fp.metodo_pagamento ORDER BY fp.data_pagamento SEPARATOR '; ') AS metodos_pagamentos
     FROM
         financeiro_faturas ff
     JOIN
         clientes c ON ff.id_cliente = c.id_cliente
     LEFT JOIN
-        ordens_servico os ON ff.id_os = os.id_os
-    LEFT JOIN
-        locacoes_faturas lf ON ff.id_fatura_locacao = lf.id_fatura_locacao
+        financeiro_pagamentos fp ON ff.id_fatura = fp.id_fatura
+    WHERE " . implode(' AND ', $where_clauses) . "
+    GROUP BY ff.id_fatura
+    ORDER BY ff.data_emissao DESC
 ";
 
-$query_base_recibos = "
-    SELECT
-        fp.id_pagamento, fp.id_fatura, fp.data_pagamento, fp.valor_pago, fp.metodo_pagamento,
-        ff.id_fatura, ff.valor_total AS valor_total_fatura, ff.status_fatura, ff.tipo_documento,
-        c.nome AS nome_cliente,
-        os.id_os AS numero_os,
-        lf.data_referencia_fatura AS ref_locacao
-    FROM
-        financeiro_pagamentos fp
-    JOIN
-        financeiro_faturas ff ON fp.id_fatura = ff.id_fatura
-    JOIN
-        clientes c ON ff.id_cliente = c.id_cliente
-    LEFT JOIN
-        ordens_servico os ON ff.id_os = os.id_os
-    LEFT JOIN
-        locacoes_faturas lf ON ff.id_fatura_locacao = lf.id_fatura_locacao
-";
-
-if ($tipo_documento === 'faturas') {
-    $current_query = $query_base_faturas;
-    if ($status_filter) {
-        $where_clauses[] = "ff.status_fatura = ?";
-        $query_params[] = $status_filter;
-    }
-    if ($cliente_filter) {
-        $where_clauses[] = "ff.id_cliente = ?";
-        $query_params[] = $cliente_filter;
-    }
-    if ($data_inicio_filter) {
-        $where_clauses[] = "ff.data_emissao >= ?";
-        $query_params[] = $data_inicio_filter . ' 00:00:00';
-    }
-    if ($data_fim_filter) {
-        $where_clauses[] = "ff.data_emissao <= ?";
-        $query_params[] = $data_fim_filter . ' 23:59:59';
-    }
-    if ($search_query) {
-        $where_clauses[] = "(c.nome LIKE ? OR os.id_os LIKE ?)";
-        $query_params[] = "%" . $search_query . "%";
-        $query_params[] = "%" . $search_query . "%";
-    }
-} else { // recibos
-    $current_query = $query_base_recibos;
-    if ($status_filter) { // Para recibos, o status se refere ao status da fatura
-        $where_clauses[] = "ff.status_fatura = ?";
-        $query_params[] = $status_filter;
-    }
-    if ($cliente_filter) {
-        $where_clauses[] = "ff.id_cliente = ?";
-        $query_params[] = $cliente_filter;
-    }
-    if ($data_inicio_filter) {
-        $where_clauses[] = "fp.data_pagamento >= ?";
-        $query_params[] = $data_inicio_filter . ' 00:00:00';
-    }
-    if ($data_fim_filter) {
-        $where_clauses[] = "fp.data_pagamento <= ?";
-        $query_params[] = $data_fim_filter . ' 23:59:59';
-    }
-    if ($search_query) {
-        $where_clauses[] = "(c.nome LIKE ? OR ff.id_fatura LIKE ?)";
-        $query_params[] = "%" . $search_query . "%";
-        $query_params[] = "%" . $search_query . "%";
-    }
-}
-
-if (!empty($where_clauses)) {
-    $current_query .= " WHERE " . implode(" AND ", $where_clauses);
-}
-
-if ($tipo_documento === 'faturas') {
-    $current_query .= " ORDER BY ff.data_emissao DESC";
-} else {
-    $current_query .= " ORDER BY fp.data_pagamento DESC";
-}
+// Contagem total para paginação
+$sql_count = "
+    SELECT COUNT(DISTINCT ff.id_fatura)
+    FROM financeiro_faturas ff
+    JOIN clientes c ON ff.id_cliente = c.id_cliente
+    WHERE " . implode(' AND ', $where_clauses);
 
 try {
-    $stmt = $pdo->prepare($current_query);
-    $stmt->execute($query_params);
-    $documentos = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    // Contar total de registros
+    $stmt_count = $pdo->prepare($sql_count);
+    foreach ($params as $key => $val) {
+        $stmt_count->bindValue($key, $val);
+    }
+    $stmt_count->execute();
+    $total_records = $stmt_count->fetchColumn(); // Use fetchColumn() for COUNT(*)
 
-    // Para o filtro de cliente
-    $stmt_clientes = $pdo->query("SELECT id_cliente, nome FROM clientes ORDER BY nome");
-    $clientes_disponiveis = $stmt_clientes->fetchAll(PDO::FETCH_ASSOC);
+    $total_pages = ceil($total_records / $limit);
+    $offset = ($page - 1) * $limit;
+
+    // Adicionar LIMIT e OFFSET à consulta principal
+    $sql_base .= " LIMIT :limit OFFSET :offset";
+    $params[':limit'] = $limit;
+    $params[':offset'] = $offset;
+
+    $stmt = $pdo->prepare($sql_base);
+    foreach ($params as $key => $val) {
+        $stmt->bindValue($key, $val);
+    }
+    $stmt->execute();
+    $financeiro_registros = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 } catch (PDOException $e) {
-    error_log("Erro ao listar documentos financeiros: " . $e->getMessage());
-    adicionarMensagem('error', 'Erro ao carregar documentos financeiros: ' . $e->getMessage());
-    $documentos = [];
-    $clientes_disponiveis = [];
+    echo "<div class='alert alert-danger'>Erro ao carregar registros financeiros: " . $e->getMessage() . "</div>";
+    error_log("Erro ao carregar registros financeiros: " . $e->getMessage());
+    $financeiro_registros = []; // Garante que a variável esteja definida mesmo em caso de erro
+    $total_pages = 1;
 }
 
-include '../../includes/header.php';
 ?>
 
-<div class="container my-4"> <div class="row justify-content-center"> <main class="col-lg-10 col-md-12 px-md-4"> <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-                <h1 class="h2">
-                    <?php echo ($tipo_documento === 'faturas') ? 'Faturas' : 'Recibos'; ?>
-                </h1>
+<div class="container-fluid">
+    <div class="row">
+        <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+            <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                <h1 class="h2">Financeiro - Faturas</h1>
                 <div class="btn-toolbar mb-2 mb-md-0">
-                    <div class="btn-group me-2">
-                        <a href="faturas.php" class="btn btn-sm btn-outline-primary">Nova Fatura</a>
-                        <a href="recibos.php" class="btn btn-sm btn-outline-success">Novo Recibo</a>
-                    </div>
+                    <a href="adicionar_fatura.php" class="btn btn-sm btn-outline-secondary me-2">
+                        <i class="bi bi-plus-circle"></i> Nova Fatura
+                    </a>
                 </div>
             </div>
-
-            <?php exibirMensagemFlash(); ?>
 
             <div class="card mb-4">
                 <div class="card-header">
                     Filtros
                 </div>
                 <div class="card-body">
-                    <form action="" method="GET" class="row g-3 align-items-end">
-                        <input type="hidden" name="tipo" value="<?php echo htmlspecialchars($tipo_documento); ?>">
-
-                        <div class="col-md-4 col-lg-3">
-                            <label for="status_filter" class="form-label">Status</label>
-                            <select class="form-select" id="status_filter" name="status">
+                    <form method="GET" action="listar.php" class="row g-3">
+                        <div class="col-md-3">
+                            <label for="tipo_documento" class="form-label">Tipo Documento</label>
+                            <select class="form-select" id="tipo_documento" name="tipo_documento">
                                 <option value="">Todos</option>
-                                <?php if ($tipo_documento === 'faturas'): ?>
-                                    <option value="Pendente" <?php echo ($status_filter == 'Pendente') ? 'selected' : ''; ?>>Pendente</option>
-                                    <option value="Paga" <?php echo ($status_filter == 'Paga') ? 'selected' : ''; ?>>Paga</option>
-                                    <option value="Atrasada" <?php echo ($status_filter == 'Atrasada') ? 'selected' : ''; ?>>Atrasada</option>
-                                    <option value="Cancelada" <?php echo ($status_filter == 'Cancelada') ? 'selected' : ''; ?>>Cancelada</option>
-                                    <option value="Parcialmente Paga" <?php echo ($status_filter == 'Parcialmente Paga') ? 'selected' : ''; ?>>Parcialmente Paga</option>
-                                <?php else: // Recibos ?>
-                                    <option value="Paga" <?php echo ($status_filter == 'Paga') ? 'selected' : ''; ?>>Fatura Paga</option>
-                                    <option value="Parcialmente Paga" <?php echo ($status_filter == 'Parcialmente Paga') ? 'selected' : ''; ?>>Fatura Parcialmente Paga</option>
-                                <?php endif; ?>
+                                <option value="OS" <?php echo $tipo_documento_filter == 'OS' ? 'selected' : ''; ?>>Ordem de Serviço</option>
+                                <option value="Locação" <?php echo $tipo_documento_filter == 'Locação' ? 'selected' : ''; ?>>Locação</option>
+                                <option value="Avulso" <?php echo $tipo_documento_filter == 'Avulso' ? 'selected' : ''; ?>>Avulso</option>
                             </select>
                         </div>
-                        <div class="col-md-8 col-lg-4">
-                            <label for="cliente_filter" class="form-label">Cliente</label>
-                            <select class="form-select select2-cliente" id="cliente_filter" name="cliente_id" data-placeholder="Selecione um cliente">
-                                <option value=""></option>
-                                <?php foreach ($clientes_disponiveis as $cliente): ?>
-                                    <option value="<?php echo $cliente['id_cliente']; ?>" <?php echo ($cliente_filter == $cliente['id_cliente']) ? 'selected' : ''; ?>>
-                                        <?php echo htmlspecialchars($cliente['nome']); ?>
-                                    </option>
-                                <?php endforeach; ?>
+                        <div class="col-md-3">
+                            <label for="status" class="form-label">Status da Fatura</label>
+                            <select class="form-select" id="status" name="status">
+                                <option value="">Todos</option>
+                                <option value="Pendente" <?php echo $status_filter == 'Pendente' ? 'selected' : ''; ?>>Pendente</option>
+                                <option value="Paga" <?php echo $status_filter == 'Paga' ? 'selected' : ''; ?>>Paga</option>
+                                <option value="Cancelada" <?php echo $status_filter == 'Cancelada' ? 'selected' : ''; ?>>Cancelada</option>
+                                <option value="Atrasada" <?php echo $status_filter == 'Atrasada' ? 'selected' : ''; ?>>Atrasada</option>
+                                <option value="Parcialmente Paga" <?php echo $status_filter == 'Parcialmente Paga' ? 'selected' : ''; ?>>Parcialmente Paga</option>
                             </select>
                         </div>
-                        <div class="col-md-6 col-lg-2">
-                            <label for="data_inicio_filter" class="form-label">Data Início</label>
-                            <input type="date" class="form-control" id="data_inicio_filter" name="data_inicio" value="<?php echo htmlspecialchars($data_inicio_filter); ?>">
+                        <div class="col-md-3">
+                            <label for="data_inicio" class="form-label">Data Início (Emissão)</label>
+                            <input type="date" class="form-control" id="data_inicio" name="data_inicio" value="<?php echo htmlspecialchars($data_inicio_filter); ?>">
                         </div>
-                        <div class="col-md-6 col-lg-2">
-                            <label for="data_fim_filter" class="form-label">Data Fim</label>
-                            <input type="date" class="form-control" id="data_fim_filter" name="data_fim" value="<?php echo htmlspecialchars($data_fim_filter); ?>">
+                        <div class="col-md-3">
+                            <label for="data_fim" class="form-label">Data Fim (Emissão)</label>
+                            <input type="date" class="form-control" id="data_fim" name="data_fim" value="<?php echo htmlspecialchars($data_fim_filter); ?>">
                         </div>
-                        <div class="col-md-8 col-lg-3">
-                            <label for="search_query" class="form-label">Buscar</label>
-                            <input type="text" class="form-control" id="search_query" name="q" placeholder="Buscar por cliente, OS, etc." value="<?php echo htmlspecialchars($search_query); ?>">
+                        <div class="col-md-6">
+                            <label for="cliente" class="form-label">Cliente</label>
+                            <input type="text" class="form-control" id="cliente" name="cliente" placeholder="Nome do Cliente" value="<?php echo htmlspecialchars($cliente_filter); ?>">
                         </div>
-                        <div class="col-md-4 col-lg-1 d-grid">
-                            <button type="submit" class="btn btn-primary">Filtrar</button>
-                        </div>
-                        <div class="col-md-4 col-lg-1 d-grid">
-                            <a href="listar.php?tipo=<?php echo htmlspecialchars($tipo_documento); ?>" class="btn btn-secondary">Limpar</a>
+                        <div class="col-12">
+                            <button type="submit" class="btn btn-primary">Aplicar Filtros</button>
+                            <a href="listar.php" class="btn btn-secondary">Limpar Filtros</a>
                         </div>
                     </form>
                 </div>
             </div>
 
             <div class="table-responsive">
-                <?php if ($tipo_documento === 'faturas'): ?>
-                    <table class="table table-striped table-hover">
-                        <thead>
+                <table class="table table-striped table-hover">
+                    <thead>
+                        <tr>
+                            <th>ID Fatura</th>
+                            <th>Tipo Documento</th>
+                            <th>Cliente</th>
+                            <th>Valor Total</th>
+                            <th>Data Emissão</th>
+                            <th>Data Vencimento</th>
+                            <th>Status</th>
+                            <th>Pagamentos</th>
+                            <th>Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if (empty($financeiro_registros)): ?>
                             <tr>
-                                <th>ID Fatura</th>
-                                <th>Cliente</th>
-                                <th>Origem</th>
-                                <th>Data Emissão</th>
-                                <th>Vencimento</th>
-                                <th>Valor Total</th>
-                                <th>Status</th>
-                                <th>Ações</th>
+                                <td colspan="9" class="text-center">Nenhuma fatura encontrada com os filtros aplicados.</td>
                             </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($documentos)): ?>
+                        <?php else: ?>
+                            <?php foreach ($financeiro_registros as $registro): ?>
                                 <tr>
-                                    <td colspan="8" class="text-center">Nenhuma fatura encontrada.</td>
-                                </tr>
-                            <?php else: ?>
-                                <?php foreach ($documentos as $fatura): ?>
-                                    <tr>
-                                        <td><?php echo htmlspecialchars($fatura['id_fatura']); ?></td>
-                                        <td><?php echo htmlspecialchars($fatura['nome_cliente']); ?></td>
-                                        <td>
-                                            <?php
-                                            if ($fatura['tipo_documento'] === 'OS' && $fatura['numero_os']) {
-                                                echo 'OS: <a href="../ordens/view.php?id=' . $fatura['numero_os'] . '">' . htmlspecialchars($fatura['numero_os']) . '</a>';
-                                            } elseif ($fatura['tipo_documento'] === 'Locação' && $fatura['ref_locacao']) {
-                                                echo 'Locação Ref: ' . formatarData($fatura['ref_locacao'], 'm/Y');
-                                            } else {
-                                                echo 'Avulso';
+                                    <td><?php echo htmlspecialchars($registro['id']); ?></td>
+                                    <td><?php echo htmlspecialchars($registro['tipo_lancamento']); ?></td>
+                                    <td><?php echo htmlspecialchars($registro['nome_cliente']); ?></td>
+                                    <td>R$ <?php echo number_format($registro['valor'], 2, ',', '.'); ?></td>
+                                    <td><?php echo date('d/m/Y', strtotime($registro['data_origem'])); ?></td>
+                                    <td>
+                                        <?php
+                                            echo (!empty($registro['data_vencimento']) && $registro['data_vencimento'] != '0000-00-00') ? date('d/m/Y', strtotime($registro['data_vencimento'])) : 'N/A';
+                                        ?>
+                                    </td>
+                                    <td>
+                                        <span class="badge bg-<?php
+                                            $status_display = strtolower($registro['status_origem']); // Use o status original da fatura
+                                            $status_class = 'secondary'; // Default fallback
+
+                                            // Lógica para status 'Atrasada' - pode ser aplicada no front-end
+                                            $is_atrasada = false;
+                                            if ($status_display == 'pendente' &&
+                                                (!empty($registro['data_vencimento']) && $registro['data_vencimento'] != '0000-00-00 00:00:00') &&
+                                                (strtotime($registro['data_vencimento']) < time()) ) {
+                                                $is_atrasada = true;
                                             }
-                                            ?>
-                                        </td>
-                                        <td><?php echo formatarData($fatura['data_emissao']); ?></td>
-                                        <td><?php echo formatarData($fatura['data_vencimento']); ?></td>
-                                        <td><?php echo formatarMoeda($fatura['valor_total']); ?></td>
-                                        <td>
-                                            <span class="badge bg-<?php echo getStatusBadgeClass($fatura['status_fatura']); ?>">
-                                                <?php echo htmlspecialchars($fatura['status_fatura']); ?>
-                                            </span>
-                                        </td>
-                                        <td>
-                                            <div class="d-flex flex-nowrap">
-                                                <a href="view.php?tipo=fatura&id=<?php echo $fatura['id_fatura']; ?>" class="btn btn-info btn-sm me-1" title="Ver Detalhes">
-                                                    <i class="bi bi-eye"></i>
-                                                </a>
-                                                <a href="faturas.php?id=<?php echo $fatura['id_fatura']; ?>" class="btn btn-warning btn-sm me-1" title="Editar Fatura">
-                                                    <i class="bi bi-pencil"></i>
-                                                </a>
-                                                <button type="button" class="btn btn-danger btn-sm btn-excluir" data-id="<?php echo $fatura['id_fatura']; ?>" data-tipo="fatura" title="Excluir Fatura">
-                                                    <i class="bi bi-trash"></i>
-                                                </button>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
-                <?php else: // Recibos ?>
-                    <table class="table table-striped table-hover">
-                        <thead>
-                            <tr>
-                                <th>ID Recibo</th>
-                                <th>Fatura Ref.</th>
-                                <th>Cliente</th>
-                                <th>Data Pagamento</th>
-                                <th>Valor Pago</th>
-                                <th>Método</th>
-                                <th>Ações</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($documentos)): ?>
-                                <tr>
-                                    <td colspan="7" class="text-center">Nenhum recibo encontrado.</td>
+
+                                            if ($is_atrasada) {
+                                                $status_class = 'danger';
+                                                $status_display = 'Atrasada'; // Sobrescreve para exibição
+                                            } else {
+                                                switch ($status_display) {
+                                                    case 'paga': $status_class = 'success'; break;
+                                                    case 'pendente': $status_class = 'warning'; break;
+                                                    case 'cancelada': $status_class = 'info'; break;
+                                                    case 'parcialmente paga': $status_class = 'primary'; break;
+                                                    default: $status_class = 'secondary'; break;
+                                                }
+                                            }
+                                            echo $status_class;
+                                        ?>"><?php echo ucwords(str_replace('_', ' ', $status_display)); ?></span>
+                                    </td>
+                                    <td>
+                                        <?php
+                                        // Exibir detalhes de pagamentos se existirem
+                                        if (!empty($registro['valores_pagos'])) {
+                                            $valores_pagos = explode('; ', $registro['valores_pagos']);
+                                            $datas_pagamentos = explode('; ', $registro['datas_pagamentos']);
+                                            $metodos_pagamentos = explode('; ', $registro['metodos_pagamentos']);
+
+                                            echo "<ul>";
+                                            foreach ($valores_pagos as $index => $valor_pago) {
+                                                echo "<li>R$ " . number_format($valor_pago, 2, ',', '.') . " em " . date('d/m/Y H:i', strtotime($datas_pagamentos[$index])) . " (" . htmlspecialchars($metodos_pagamentos[$index]) . ")</li>";
+                                            }
+                                            echo "</ul>";
+                                        } else {
+                                            echo "Nenhum pagamento registrado.";
+                                        }
+                                        ?>
+                                    </td>
+                                    <td>
+                                        <a href="view.php?id=<?php echo $registro['id']; ?>" class="btn btn-sm btn-info" title="Ver Detalhes">
+                                            <i class="bi bi-eye"></i>
+                                        </a>
+                                        <a href="editar_fatura.php?id=<?php echo $registro['id']; ?>" class="btn btn-sm btn-primary" title="Editar Fatura">
+                                            <i class="bi bi-pencil"></i>
+                                        </a>
+                                        <a href="adicionar_pagamento.php?fatura_id=<?php echo $registro['id']; ?>" class="btn btn-sm btn-success" title="Adicionar Pagamento">
+                                            <i class="bi bi-currency-dollar"></i>
+                                        </a>
+                                        <button type="button" class="btn btn-sm btn-danger btn-delete-financeiro" data-id="<?php echo $registro['id']; ?>" data-type="fatura" title="Excluir Fatura">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    </td>
                                 </tr>
-                            <?php else: ?>
-                                <?php foreach ($documentos as $recibo): ?>
-                                    <tr>
-                                        <td><?php echo htmlspecialchars($recibo['id_pagamento']); ?></td>
-                                        <td>
-                                            <a href="view.php?tipo=fatura&id=<?php echo $recibo['id_fatura']; ?>" title="Ver Fatura">
-                                                Fatura #<?php echo htmlspecialchars($recibo['id_fatura']); ?>
-                                            </a>
-                                        </td>
-                                        <td><?php echo htmlspecialchars($recibo['nome_cliente']); ?></td>
-                                        <td><?php echo formatarData($recibo['data_pagamento']); ?></td>
-                                        <td><?php echo formatarMoeda($recibo['valor_pago']); ?></td>
-                                        <td><?php echo htmlspecialchars($recibo['metodo_pagamento']); ?></td>
-                                        <td>
-                                            <div class="d-flex flex-nowrap">
-                                                <a href="view.php?tipo=recibo&id=<?php echo $recibo['id_pagamento']; ?>" class="btn btn-info btn-sm me-1" title="Ver Detalhes">
-                                                    <i class="bi bi-eye"></i>
-                                                </a>
-                                                <a href="recibos.php?id=<?php echo $recibo['id_pagamento']; ?>" class="btn btn-warning btn-sm me-1" title="Editar Recibo">
-                                                    <i class="bi bi-pencil"></i>
-                                                </a>
-                                                <button type="button" class="btn btn-danger btn-sm btn-excluir" data-id="<?php echo $recibo['id_pagamento']; ?>" data-tipo="recibo" title="Excluir Recibo">
-                                                    <i class="bi bi-trash"></i>
-                                                </button>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
-                <?php endif; ?>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
             </div>
+
+            <nav aria-label="Paginação de faturas">
+                <ul class="pagination justify-content-center">
+                    <li class="page-item <?php echo ($page <= 1) ? 'disabled' : ''; ?>">
+                        <a class="page-link" href="?page=<?php echo $page - 1; ?>&<?php echo http_build_query(array_merge($_GET, ['page' => $page - 1])); ?>" tabindex="-1" aria-disabled="true">Anterior</a>
+                    </li>
+                    <?php for ($i = 1; $i <= $total_pages; $i++): ?>
+                        <li class="page-item <?php echo ($page == $i) ? 'active' : ''; ?>">
+                            <a class="page-link" href="?page=<?php echo $i; ?>&<?php echo http_build_query(array_merge($_GET, ['page' => $i])); ?>"><?php echo $i; ?></a>
+                        </li>
+                    <?php endfor; ?>
+                    <li class="page-item <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>">
+                        <a class="page-link" href="?page=<?php echo $page + 1; ?>&<?php echo http_build_query(array_merge($_GET, ['page' => $page + 1])); ?>">Próximo</a>
+                    </li>
+                </ul>
+            </nav>
+
+            <div class="modal fade" id="confirmDeleteModal" tabindex="-1" aria-labelledby="confirmDeleteModalLabel" aria-hidden="true">
+                <div class="modal-dialog">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title" id="confirmDeleteModalLabel">Confirmar Exclusão</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            Tem certeza de que deseja excluir esta fatura e seus pagamentos? Esta ação é irreversível.
+                            <input type="hidden" id="deleteRecordId">
+                            <input type="hidden" id="deleteRecordType">
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                            <button type="button" class="btn btn-danger" id="confirmDeleteBtn">Excluir</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
         </main>
     </div>
 </div>
 
-<?php include '../../includes/footer.php'; ?>
+<?php
+// Inclui o rodapé da página.
+require_once '../../includes/footer.php';
+?>
 
 <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        // Inicializa Select2 para clientes
-        $('.select2-cliente').select2({
-            theme: "bootstrap-5",
-            width: $(this).data('width') ? $(this).data('width') : $(this).hasClass('w-100') ? '100%' : 'style',
-            placeholder: $(this).data('placeholder'),
-            allowClear: true, // Permite limpar a seleção
-            minimumInputLength: 0, // Não requer digitação mínima para buscar (para popular com todos os clientes)
-            // Se você quiser autocomplete para clientes, você precisaria de um endpoint AJAX aqui.
-            // Por enquanto, ele carrega todos os clientes no PHP e o Select2 faz a busca local.
-        });
+document.addEventListener('DOMContentLoaded', function() {
+    var confirmDeleteModal = new bootstrap.Modal(document.getElementById('confirmDeleteModal'));
+    var deleteButtons = document.querySelectorAll('.btn-delete-financeiro');
+    var confirmDeleteBtn = document.getElementById('confirmDeleteBtn');
+    var deleteRecordIdInput = document.getElementById('deleteRecordId');
+    var deleteRecordTypeInput = document.getElementById('deleteRecordType');
 
-        // Lidar com a exclusão de documentos financeiros
-        document.querySelectorAll('.btn-excluir').forEach(button => {
-            button.addEventListener('click', function() {
-                const id = this.dataset.id;
-                const tipo = this.dataset.tipo; // 'fatura' ou 'recibo'
-                const confirmacao = confirm(`Tem certeza que deseja excluir este ${tipo === 'fatura' ? 'fatura' : 'recibo'}?`);
-
-                if (confirmacao) {
-                    fetch('../../ajax/financeiro_acoes.php', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                        },
-                        body: `action=excluir_${tipo}&id=${id}&csrf_token=<?php echo $_SESSION['csrf_token']; ?>`
-                    })
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.success) {
-                            alert(data.message);
-                            location.reload(); // Recarrega a página para atualizar a lista
-                        } else {
-                            alert('Erro: ' + data.message);
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Erro:', error);
-                        alert('Ocorreu um erro ao tentar excluir o documento.');
-                    });
-                }
-            });
+    deleteButtons.forEach(button => {
+        button.addEventListener('click', function() {
+            var id = this.getAttribute('data-id');
+            var type = this.getAttribute('data-type'); // 'fatura'
+            deleteRecordIdInput.value = id;
+            deleteRecordTypeInput.value = type;
+            confirmDeleteModal.show();
         });
     });
+
+    confirmDeleteBtn.addEventListener('click', function() {
+        var id = deleteRecordIdInput.value;
+        var type = deleteRecordTypeInput.value;
+
+        // Redireciona para um script de exclusão com base no tipo
+        window.location.href = `delete_financeiro.php?id=${id}&type=${type}`;
+    });
+});
 </script>
